@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://freqtrade-cn.github.io/freqtrade-cn/sitemap.xml
