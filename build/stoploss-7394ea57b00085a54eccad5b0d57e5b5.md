@@ -1,0 +1,277 @@
+---
+title: 止损配置指南
+short_title: 止损
+description: 详细介绍 Freqtrade 中的止损功能,包括静态止损、追踪止损等多种止损模式的配置方法。
+---
+
+# 止损
+
+`stoploss` 配置参数是触发卖出的损失比率。
+例如，值 `-0.10` 将在给定交易的利润低于 -10% 时立即卖出。此参数是可选的。
+止损计算包括手续费，所以 -10% 的止损正好设置在入场点下方 10% 的位置。
+
+大多数策略文件已经包含了最优的 `stoploss` 值。
+
+:::{note}
+本文件中提到的所有止损属性都可以在策略中或配置中设置。  
+<ins>配置值将覆盖策略值。</ins>
+:::
+
+## 交易所止损/Freqtrade
+
+这些止损模式可以是*交易所止损*或*非交易所止损*。
+
+这些模式可以使用以下值进行配置：
+
+```python
+    'emergency_exit': 'market',
+    'stoploss_on_exchange': False
+    'stoploss_on_exchange_interval': 60,
+    'stoploss_on_exchange_limit_ratio': 0.99
+```
+
+交易所止损仅支持以下交易所，并非所有交易所都同时支持止损限价单和止损市价单。
+如果只提供一种模式，订单类型将被忽略。
+
+| 交易所 | 止损类型 |
+|----------|-------------|
+| Binance  | 限价单 |
+| Binance Futures  | 市价单, 限价单 |
+| Bingx    | 市价单, 限价单 |
+| Bitget | 市价单, 限价单 |
+| HTX      | 限价单 |
+| kraken   | 市价单, 限价单 |
+| Gate     | 限价单 |
+| Okx      | 限价单 |
+| Kucoin   | 止损限价单, 止损市价单|
+| Hyperliquid (仅期货)   | 限价单 |
+
+:::{note} 紧密止损
+<ins>使用交易所止损时，不要设置太低/太紧密的止损值！</ins>  
+如果设置得太低/太紧密，您将面临更大的订单无法成交的风险，止损将无法正常工作。
+:::
+
+### stoploss_on_exchange 和 stoploss_on_exchange_limit_ratio
+
+启用或禁用交易所止损。
+如果止损是*交易所止损*，意味着在买入订单成交后立即在交易所放置止损限价单。这将保护您免受市场突然崩盘的影响，因为订单执行完全在交易所内进行，没有潜在的网络开销。
+
+如果 `stoploss_on_exchange` 使用限价单，交易所需要两个价格：止损价格和限价。  
+`stoploss` 定义了放置限价单的触发价格 - 而限价应该略低于这个价格。  
+如果交易所同时支持限价和市价止损订单，则 `stoploss` 的值将用于确定止损类型。  
+
+计算示例：我们以 100\$ 买入资产。  
+
+触发价格是 95\$，那么限价将是 `95 * 0.99 = 94.05\$` - 所以限价单成交可能发生在 95\$ 和 94.05\$ 之间。  
+
+例如，假设启用了交易所止损和追踪止损，且市场上涨，机器人会自动取消之前的止损订单，并放置一个新的止损值高于前一个止损订单的订单。
+
+:::{note}
+如果启用了 `stoploss_on_exchange` 并且在交易所手动取消了止损，机器人将创建一个新的止损订单。
+:::
+
+### stoploss_on_exchange_interval
+
+在启用交易所止损的情况下，还有另一个参数叫做 `stoploss_on_exchange_interval`。这配置了机器人检查止损并在必要时更新的时间间隔（以秒为单位）。  
+机器人不能每 5 秒（每次迭代）都这样做，否则会被交易所封禁。所以这个参数会告诉机器人应该多久更新一次止损订单。默认值是 60（1 分钟）。如果您意外取消了止损订单，这个逻辑也会在交易所重新应用止损订单。
+
+### stoploss_price_type
+
+:::{warning} 仅适用于期货
+`stoploss_price_type` 仅适用于期货市场（在支持的交易所上）。
+Freqtrade 将在启动时验证此设置，如果为您的交易所选择了无效设置，将无法启动。
+每个交易所支持的价格类型可能不同。请查看您的交易所支持哪些价格类型。
+:::
+
+期货市场的交易所止损可以在不同的价格类型上触发。
+这些价格在交易所术语中的命名通常不同，但通常围绕"last"（或"contract price"）、"mark"和"index"。
+
+此设置的可接受值为 `"last"`、`"mark"` 和 `"index"` - freqtrade 将自动转换为相应的 API 类型，并相应地放置[交易所止损](#stoploss_on_exchange-and-stoploss_on_exchange_limit_ratio)订单。
+
+### force_exit
+
+`force_exit` 是一个可选值，默认与 `exit` 相同，在从 Telegram 或 Rest API 发送 `/forceexit` 命令时使用。
+
+### force_entry
+
+`force_entry` 是一个可选值，默认与 `entry` 相同，在从 Telegram 或 Rest API 发送 `/forceentry` 命令时使用。
+
+### emergency_exit
+
+`emergency_exit` 是一个可选值，默认为 `market`，在创建交易所止损订单失败时使用。如果未在策略或配置文件中更改，则使用以下默认值。
+
+策略文件示例：
+
+```python
+order_types = {
+    "entry": "limit",
+    "exit": "limit",
+    "emergency_exit": "market",
+    "stoploss": "market",
+    "stoploss_on_exchange": True,
+    "stoploss_on_exchange_interval": 60,
+    "stoploss_on_exchange_limit_ratio": 0.99
+}
+```
+
+## 止损类型
+
+目前机器人包含以下止损支持模式：
+
+1. 静态止损。
+2. 追踪止损。
+3. 追踪止损，自定义正损失。
+4. 仅在交易达到特定偏移量时追踪止损。
+5. [自定义止损函数](strategy-callbacks.md#custom-stoploss)
+
+### 静态止损
+
+这很简单，您定义一个止损值 x（作为价格的比率，即价格的 x * 100%）。一旦损失超过定义的损失，这将尝试卖出资产。
+
+止损示例：
+
+```python
+    stoploss = -0.10
+```
+
+例如，简化计算：
+
+* 机器人以 100\$ 的价格买入资产
+* 止损定义为 -10%
+* 一旦资产价格跌破 90$，止损将被触发
+
+(trailing-stop-loss)=
+
+### 追踪止损
+
+初始值就是 `stoploss`，就像您定义静态止损一样。
+要启用追踪止损：
+
+```python
+    stoploss = -0.10
+    trailing_stop = True
+```
+
+这将激活一个算法，每当资产价格上涨时自动向上移动止损。
+
+例如，简化计算：
+
+* 机器人以 100$ 的价格买入资产
+* 止损定义为 -10%
+* 一旦资产价格跌破 90$，止损将被触发
+* 假设资产现在上涨到 102$
+* 止损现在将是 102$ 的 -10% = 91.8$
+* 现在资产价值下降到 101$，止损仍将是 91.8$，将在 91.8$ 触发。
+
+总结：止损将调整为始终是最高观察价格的 -10%。
+
+(trailing-stop-loss-different-positive-loss)=
+
+### 追踪止损，不同的正损失
+
+您也可以在买入亏损时（买入 - 手续费）使用默认止损，但一旦达到正收益（或您定义的偏移量），系统将使用具有不同值的新止损。
+例如，您的默认止损是 -10%，但一旦达到盈利（例如 0.1%），将使用不同的追踪止损。
+
+:::{note}
+如果您希望止损仅在达到盈亏平衡或盈利时改变（大多数用户想要的），请参考下一节[启用偏移量](#trailing-stop-loss-only-once-the-trade-has-reached-a-certain-offset)。
+:::
+
+这两个值都需要将 `trailing_stop` 设置为 true，并设置 `trailing_stop_positive` 的值。
+
+```python
+    stoploss = -0.10
+    trailing_stop = True
+    trailing_stop_positive = 0.02
+    trailing_stop_positive_offset = 0.0
+    trailing_only_offset_is_reached = False  # 默认值 - 此示例不需要
+```
+
+例如，简化计算：
+
+* 机器人以 100\$ 的价格买入资产
+* 止损定义为 -10%
+* 一旦资产价格跌破 90\$，止损将被触发
+* 假设资产现在上涨到 102$
+* 止损现在将是 102$ 的 -2% = 99.96$（99.96$ 的止损将被锁定，并随着资产价格上涨以 -2% 跟随）
+* 现在资产价值下降到 101$，止损仍将是 99.96$，将在 99.96$ 触发
+
+0.02 将转换为 -2% 的止损。
+在此之前，使用 `stoploss` 作为追踪止损。
+
+:::{tip} 使用偏移量改变止损
+使用 `trailing_stop_positive_offset` 通过将 `trailing_stop_positive_offset` 设置得高于 `trailing_stop_positive` 来确保您的新追踪止损将获得利润。您的第一个新止损值将已经锁定利润。
+
+简化计算示例：
+
+```python
+    stoploss = -0.10
+    trailing_stop = True
+    trailing_stop_positive = 0.02
+    trailing_stop_positive_offset = 0.03
+```
+
+* 机器人以 100$ 的价格买入资产
+* 止损定义为 -10%，所以一旦资产价格跌破 90$，止损将被触发
+* 假设资产现在上涨到 102$
+* 止损现在将在 91.8$ - 最高观察价格的 10% 下方
+* 假设资产现在上涨到 103.5$（高于配置的偏移量）
+* 止损现在将是 103.5$ 的 -2% = 101.43$
+* 现在资产价值下降到 102$，止损仍将是 101.43$，一旦价格跌破 101.43$ 将触发
+:::
+
+(trailing-stop-loss-only-once-the-trade-has-reached-a-certain-offset)=
+
+### 仅在交易达到特定偏移量时追踪止损
+
+您也可以保持静态止损直到达到偏移量，然后在市场转向时追踪交易以获取利润。
+
+如果 `trailing_only_offset_is_reached = True`，则只有在达到偏移量时才会激活追踪止损。在此之前，止损保持在配置的 `stoploss` 值，不会追踪。
+将此值保持为 `trailing_only_offset_is_reached=False` 将允许追踪止损在资产价格首次上涨超过初始入场价格时就开始追踪。
+
+此选项可以与 `trailing_stop_positive` 一起使用或不使用，但使用 `trailing_stop_positive_offset` 作为偏移量。
+
+配置（偏移量是买入价格 + 3%）：
+
+```python
+    stoploss = -0.10
+    trailing_stop = True
+    trailing_stop_positive = 0.02
+    trailing_stop_positive_offset = 0.03
+    trailing_only_offset_is_reached = True
+```
+
+例如，简化计算：
+
+* 机器人以 100$ 的价格买入资产
+* 止损定义为 -10%
+* 一旦资产价格跌破 90$，止损将被触发
+* 除非资产上涨到或超过配置的偏移量，否则止损将保持在 90$
+* 假设资产现在上涨到 103$（我们配置偏移量的位置）
+* 止损现在将是 103$ 的 -2% = 100.94$
+* 现在资产价值下降到 101$，止损仍将是 100.94$，将在 100.94$ 触发
+
+:::{tip}
+确保此值（`trailing_stop_positive_offset`）低于最小 ROI，否则最小 ROI 将首先应用并卖出交易。
+:::
+
+## 止损和杠杆
+
+止损应该被视为"这笔交易的风险" - 所以在 100$ 的交易上设置 10% 的止损意味着您愿意在这笔交易上损失 10$（10%）- 如果价格下跌 10%，这将触发。
+
+使用杠杆时，应用相同的原则 - 止损定义交易的风险（您愿意损失的金额）。
+
+因此，在 10 倍杠杆交易上设置 10% 的止损将在价格移动 1% 时触发。
+如果您的投资金额（自有资金）是 100$ - 这笔交易在 10 倍杠杆下将是 1000$。
+如果价格移动 1% - 您已经损失了 10$ 的自有资金 - 因此在这种情况下止损将触发。
+
+请确保了解这一点，并避免使用太紧密的止损（在 10 倍杠杆下，10% 的风险可能太小，无法让交易有"呼吸"的空间）。
+
+## 更改开放交易的止损
+
+可以通过更改配置或策略中的值并使用 `/reload_config` 命令来更改开放交易的止损（或者，完全停止并重启机器人也可以）。
+
+新的止损值将应用于开放交易（并生成相应的日志消息）。
+
+### 限制
+
+如果启用了 `trailing_stop` 且止损已经被调整，或者如果启用了 [Edge](edge.md)（因为 Edge 会根据当前市场情况重新计算止损），则无法更改止损值。
