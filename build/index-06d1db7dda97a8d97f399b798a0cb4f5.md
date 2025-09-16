@@ -1,0 +1,358 @@
+---
+title: Freqtrade 交易机器人
+subject: Freqtrade 使用指南
+subtitle: 开源加密货币交易机器人
+short_title: Freqtrade 指南
+description: Freqtrade 是一个功能强大的开源加密货币交易机器人,支持多个交易所、回测、策略优化等功能。本文档详细介绍了其安装、配置和使用方法。
+tags: [Freqtrade, 交易机器人, 加密货币, 量化交易, 开源]
+categories: [交易工具, 指南]
+keywords: [Freqtrade, 加密货币交易, 量化交易, 交易机器人, 回测, 策略优化]
+author: Freqtrade 社区
+version: 1.0
+last_updated: 2024-01-15
+nav_order: 1
+toc: true
+homepage: true
+search: true
+---
+![freqtrade](assets/freqtrade_poweredby.svg)
+
+:::{note}  面向 Freqtrade 的 ccxt 最佳实践清单 👈
+:class: dropdown
+
+## 一、在 Freqtrade 里正确“摆放” ccxt
+
+### 1) 最小可用配置（Spot 现货）
+
+```json
+{
+  "exchange": {
+    "name": "binance",
+    "key": "YOUR_KEY",
+    "secret": "YOUR_SECRET",
+
+    // ccxt 通用配置（同时作用于同步/异步实例）
+    "ccxt_config": {
+      "enableRateLimit": true,          // 强烈建议：内置限流
+      "timeout": 30000                  // 30s 超时（按需调整）
+    },
+
+    // 仅作用于同步实例（下单/REST 轮询）
+    "ccxt_sync_config": {
+      "enableRateLimit": true
+    },
+
+    // 仅作用于异步实例（WS/并发拉取等）
+    "ccxt_async_config": {
+      "enableRateLimit": true,
+      "rateLimit": 500                  // 例：每 500ms 1 次；具体值看交易所规则
+    },
+
+    // WebSocket（Freqtrade 用 ccxt.pro 接入，默认启用）
+    "enable_ws": true
+  }
+}
+```
+
+* `enableRateLimit` / `rateLimit` 是 ccxt 的内置节流选项；不开很容易 429/临时封禁。([CCXT 文档][1])
+* Freqtrade 的 `exchange.enable_ws` 通过 **ccxt.pro** 消费行情流（官方已将 ccxt.pro 的功能并入主库，概念沿用）。([Freqtrade][2], [GitHub][3])
+
+### 2) 期货账户（以 Binance U 本位为例）
+
+Binance 期货建议直接用专门的 **exchange id**：
+
+```json
+{
+  "exchange": {
+    "name": "binanceusdm",             // ✅ 正确：USDT-M Futures
+    "key": "YOUR_KEY",
+    "secret": "YOUR_SECRET",
+    "ccxt_config": { "enableRateLimit": true }
+  }
+}
+```
+
+> 这是维护者在社区答复中推荐的方式，优于 `options.defaultType='future'` 的旧写法。([Stack Overflow][4])
+
+### 3) 代理（频繁下载 K 线 / 公司网络出海）
+
+* **全局**（除交易所外）：用环境变量
+
+  ```bash
+  export HTTP_PROXY=http://host:port
+  export HTTPS_PROXY=http://host:port
+  ```
+* **仅交易所流量**：放到 `ccxt_config`
+
+  ```json
+  "exchange": {
+    "ccxt_config": {
+      "httpsProxy": "http://host:port",
+      "wsProxy": "http://host:port"
+    }
+  }
+  ```
+
+  > 这一段是 Freqtrade 文档推荐的做法；`httpsProxy/wsProxy` 是 ccxt 支持的代理键名。([Freqtrade][2], [CCXT 文档][5])
+
+### 4) 不同交易所限流基线
+
+* 用 `enableRateLimit` 打开内置限流，并按交易所要求设置 `rateLimit`。
+* 例如 **Kraken** 官方示例里给了 3100ms（仅示例，实际以交易所规则为准）：
+
+  ```json
+  "ccxt_async_config": { "enableRateLimit": true, "rateLimit": 3100 }
+  ```
+
+  ([GitHub][6])
+
+### 5) 市场元数据刷新
+
+* 频繁上新/退市时，把 `markets_refresh_interval` 调高一点（默认 60 分钟）：
+  `"exchange": { "markets_refresh_interval": 60 }`。([Freqtrade][7])
+
+---
+
+## 二、实盘/回测的“稳健十条”（和你分模块跑的习惯相配）
+
+1. **限流+并发**
+
+   * 打开 `enableRateLimit`，批量拉多交易对时控制并发（异步端再加 `rateLimit`）。([CCXT 文档][1])
+
+2. **超时/重试**
+
+   * `timeout` ≥ 10s（建议 20–30s），对临时 `DDoSProtection/ExchangeNotAvailable` 做指数回退重试。([Scribd][8])
+
+3. **精度与最小下单量**
+
+   * 依据 `load_markets()` 返回的 `precision` / `limits` 做数量与价格合法化（策略内做 round/clip）。
+
+4. **账户/产品线选择**
+
+   * 期货/永续用专用 id（如 `binanceusdm`），现货用 `binance`；避免混用导致签名/路由错误。([Stack Overflow][4])
+
+5. **WebSocket 优先、REST 兜底**
+
+   * 订阅 `watch_*`（由 Freqtrade 统一消费），频繁轮询 REST 容易撞限流；WS 断线会自动重连并做回退。([Freqtrade][2], [GitHub][9])
+
+6. **代理与网络**
+
+   * 公司网络下尽量给“交易所流量”走 `httpsProxy/wsProxy`，把下载器、Telegram 等放全局代理。([Freqtrade][2])
+
+7. **下载与缓存**
+
+   * 批量补历史数据时，必要时设 `only_from_ccxt` 以强制走交易所源（兼顾一致性 vs 速度）。([Freqtrade][7])
+
+8. **沙盒/干跑**
+
+   * 初次上线或大改策略，先 `dry_run: true`；可再结合交易所测试网（若支持）。([Freqtrade][2])
+
+9. **交易所差异化参数**
+
+   * 通过 `params` 定制（如不同 Stop 类型命名差异）；遇到“触发单/止盈止损”命名不一致时，查各所说明。([Stack Overflow][10])
+
+10. **配置分层与密钥隔离**
+
+* 用 `add_config_files` 或多 `--config`，把密钥放私有文件，公用配置里仅放通用参数。([Freqtrade][2])
+
+---
+
+## 三、你最常用的两段模板
+
+### A) Binance 现货 + 代理 + WS + 限流
+
+```json
+{
+  "exchange": {
+    "name": "binance",
+    "key": "YOUR_KEY",
+    "secret": "YOUR_SECRET",
+    "enable_ws": true,
+    "ccxt_config": {
+      "enableRateLimit": true,
+      "timeout": 30000,
+      "httpsProxy": "http://127.0.0.1:7890",
+      "wsProxy": "http://127.0.0.1:7890"
+    },
+    "ccxt_async_config": { "enableRateLimit": true, "rateLimit": 500 }
+  }
+}
+```
+
+> 这一套满足你“一边拉数据一边跑模拟”的模式，尽量把实时订阅交给 WS，减少 REST 压力。([Freqtrade][2])
+
+#### B) Binance USDT 永续（USDM）
+
+```json
+{
+  "exchange": {
+    "name": "binanceusdm",
+    "key": "YOUR_KEY",
+    "secret": "YOUR_SECRET",
+    "ccxt_config": { "enableRateLimit": true }
+  }
+}
+```
+
+> 用专用 id 避免期货/现货 API 搞混。([Stack Overflow][4])
+
+---
+
+## 四、ccxt 背景速览（你关心的“底子”）
+
+* **定位 / 作用**：跨多语言（JS/TS、Python、PHP、C#、Go）的“统一交易所 API”库，覆盖行情、订单、账户、历史 K 线等，常用于策略研究、回测、实盘与做工具层。([GitHub][11])
+* **文档丰富度**：
+
+  * 官方站点与 Wiki（架构、方法、示例、故障排查），常年维护更新。([CCXT 文档][5], [GitHub][12])
+  * 代理、限流等专题文档（含 `wsProxy/httpsProxy`、`enableRateLimit/rateLimit/timeout` 等）。([CCXT 文档][5], [CCXT 文档][1])
+* **WebSocket**：原 **CCXT Pro** 的 websocket 能力自 \*\*v1.95+（2022-10）\*\*并入免费主库；接口延续 `watch_*` 形态。([GitHub][3])
+* **维护与团队**：
+
+  * GitHub 组织活跃，核心维护者包含 **Igor Kroitor (kroitor)**、**Carlo Revelli (frosty00)** 等。([GitHub][13])
+  * PyPI 元数据作者为 **Igor Kroitor**，许可证 **MIT**，近月仍在更新（例如 2025-08 的发布记录）。([PyDigger][14])
+  * 有 **OpenCollective** 赞助支持（包含近期的交易所/公司月度赞助）。([opencollective.com][15])
+* **支持交易所体量**：官方描述“100+”家以上（不同来源统计略有差异，以 docs/PyPI 描述为准）。([PyDigger][14])
+* **历史沿革**：社区与媒体普遍将项目起源追溯到 **2016–2017** 年（学术与资讯页面均有该时间窗的引用/记载）。([ETH Zürich][16], [Binance][17])
+
+---
+
+# 五、和你的使用场景强相关的补充建议
+
+* **分离“数据抓取”和“信号/撮合”**：
+  把高频行情订阅放 WS，回测/补数据走 REST 批量（限流 + 缓存）；策略线程仅消费统一的“本地缓冲/队列”，减少 API 压力。([GitHub][9])
+* **交易所特殊性**：
+  触发单/止盈止损命名不一，必要时查各自参数（例如某些所需要 `stop_loss_limit` / `take_profit_limit`）。([Stack Overflow][10])
+* **上线流程**：
+  `dry_run` → 小资金实盘 → 扩容；每一步都跑足 1–2 个波动周期，观测订单生命周期（提交→挂单→部分成交→撤单/补单）。([Freqtrade][2])
+
+---
+
+[1]: https://ccxtcn.readthedocs.io/zh_CN/latest/manual.html?utm_source=chatgpt.com "Overview — ccxt 1.13.142 文档"
+[2]: https://www.freqtrade.io/en/stable/configuration/ "Configuration - Freqtrade"
+[3]: https://github.com/ccxt/ccxt/issues/15171?utm_source=chatgpt.com "CCXT Pro Websockets merged with CCXT! · Issue #15171"
+[4]: https://stackoverflow.com/questions/59326406/how-to-make-a-binance-futures-order-with-ccxt-in-python?utm_source=chatgpt.com "How to make a binance futures order with ccxt in python?"
+[5]: https://docs.ccxt.com/?utm_source=chatgpt.com "ccxt - documentation"
+[6]: https://raw.githubusercontent.com/freqtrade/freqtrade/develop/docs/exchanges.md?utm_source=chatgpt.com "https://raw.githubusercontent.com/freqtrade/freqtr..."
+[7]: https://www.freqtrade.io/en/stable/configuration/?utm_source=chatgpt.com "Configuration"
+[8]: https://www.scribd.com/document/397393684/ccxt?utm_source=chatgpt.com "CCXT | PDF | Internet Architecture"
+[9]: https://github.com/ccxt/ccxt/wiki/ccxt.pro.manual/7ed087b8056393f51bbdd1735e5a9ee5baf29a2e?utm_source=chatgpt.com "ccxt.pro.manual"
+[10]: https://stackoverflow.com/questions/67050373/how-to-place-a-stop-buy-order-by-ccxt-in-binance?utm_source=chatgpt.com "how to place a stop-buy order by ccxt in binance"
+[11]: https://github.com/ccxt/ccxt?utm_source=chatgpt.com "ccxt/ccxt: A JavaScript / TypeScript / Python / C# / PHP / Go ..."
+[12]: https://github.com/ccxt/ccxt/wiki?utm_source=chatgpt.com "Home · ccxt/ccxt Wiki"
+[13]: https://github.com/orgs/ccxt/people?utm_source=chatgpt.com "Members · People · ccxt"
+[14]: https://pydigger.com/pypi/ccxt?utm_source=chatgpt.com "ccxt"
+[15]: https://opencollective.com/ccxt?utm_source=chatgpt.com "CCXT"
+[16]: https://ethz.ch/content/dam/ethz/special-interest/mtec/chair-of-entrepreneurial-risks-dam/documents/dissertation/master%20thesis/masterthesis_Victor-Revuelta.pdf?utm_source=chatgpt.com "Design and implementation of a software system for ..."
+[17]: https://www.binance.com/en/square/post/24893125992898?utm_source=chatgpt.com "Crypto quantitative artifact CCXT is caught in the scandal of ..."
+
+
+:::
+
+## 简介
+
+Freqtrade 是一个用 `Python` 编写的免费开源加密货币交易机器人。
+
+* 它支持所有主流交易所，并可通过 Telegram 或 WebUI 控制。
+* 它包含回测、绘图和资金管理工具，以及基于机器学习的策略优化功能。
+
+:::{danger} 免责声明
+本软件仅供教育用途。请勿拿你无法承受损失的资金进行风险投资。使用本软件风险自负。作者及所有相关方对你的交易结果不承担任何责任。
+
+请务必先以 `Dry-run`（模拟盘）模式运行交易机器人，在完全理解其工作原理及可能的盈亏预期前，不要投入真实资金。
+
+我们强烈建议你具备基本的编程技能和 `Python` 知识。请不要犹豫，阅读源代码，理解本机器人实现的机制、算法和技术。
+:::
+
+![freqtrade 截图](assets/freqtrade-screenshot.png)
+
+## 功能特性
+
+* **开发你的策略**
+  * 用 [pandas](https://pandas.pydata.org/) 在 `Python` 中编写你的交易策略。
+  * 可在 [策略仓库](https://github.com/freqtrade/freqtrade-strategies) 中找到示例策略以供参考。
+* **下载市场数据**
+  * 下载你可能想交易的交易所和市场的历史数据。
+* **回测**
+  * 在下载的历史数据上测试你的策略。
+* **优化**
+  * 通过超参数优化（采用机器学习方法）为你的策略寻找最佳参数。你可以优化买入、卖出、止盈（ROI）、止损和追踪止损等参数。
+* **选择市场**
+  * 创建你的静态市场列表，或基于交易量和/或价格自动选择（回测时不可用）。你也可以明确黑名单不想交易的市场。
+* **运行**
+  * 用模拟资金（Dry-Run 模式）测试你的策略，或用真实资金（Live-Trade 模式）部署。
+* **使用 Edge（可选模块）运行**
+  * 该概念是通过止损变化找到各市场的最佳历史[交易期望值](./edge.md#expect)，然后允许/拒绝市场进行交易。交易规模基于你资金的风险百分比。
+* **控制/监控**
+  * 通过 Telegram 或 WebUI 控制/监控（启动/停止机器人，显示盈亏、每日总结、当前持仓结果等）。
+* **分析**
+  * 可对回测数据或 Freqtrade 交易历史（SQL 数据库）进行进一步分析，包括自动标准图表，以及将数据加载到[交互式环境](./data-analysis.md)的方法。
+
+## 支持的交易所
+
+请阅读[交易所特别说明](exchanges.md)，了解每个交易所可能需要的特殊配置。
+
+* [X] [Binance](https://www.binance.com/)
+* [X] [BingX](https://bingx.com/invite/0EM9RX)
+* [X] [Bitmart](https://bitmart.com/)
+* [X] [Bybit](https://bybit.com/)
+* [X] [Gate.io](https://www.gate.io/ref/6266643)
+* [X] [HTX](https://www.htx.com/)
+* [X] [Hyperliquid](https://hyperliquid.xyz/)（去中心化交易所 DEX）
+* [X] [Kraken](https://kraken.com/)
+* [X] [OKX](https://okx.com/)
+* [X] [MyOKX](https://okx.com/)（OKX EEA）
+* [ ] [还有许多其他,你可以通过 CCXT](https://github.com/ccxt/ccxt/)来参考或启用 _(我们无法保证它们都能正常工作)_
+
+### 支持的合约交易所（实验性）
+
+* [X] [Binance](https://www.binance.com/)
+* [X] [Bybit](https://bybit.com/)
+* [X] [Gate.io](https://www.gate.io/ref/6266643)
+* [X] [Hyperliquid](https://hyperliquid.xyz/)（去中心化交易所 DEX）
+* [X] [OKX](https://okx.com/)
+
+请务必阅读[交易所特别说明](./exchanges.md)以及[杠杆交易文档](./leverage.md)后再深入使用。
+
+### 社区测试通过
+
+由社区确认可用的交易所：
+
+* [X] [Bitvavo](https://bitvavo.com/)
+* [X] [Kucoin](https://www.kucoin.com/)
+
+## 社区展示
+
+```{include} includes/showcase.md
+```
+
+## 系统需求
+
+### 硬件要求
+
+我们建议你在 Linux 云主机上运行本机器人，最低配置为：
+
+* 2GB 内存
+* 1GB 磁盘空间
+* 2vCPU
+
+### 软件要求
+
+* Docker（推荐）
+
+或可选
+
+* Python 3.10+
+* pip（pip3）
+* git
+* TA-Lib
+* virtualenv（推荐）
+
+## 支持
+
+### 帮助 / Discord
+
+如有文档未涵盖的问题、需要进一步了解机器人，或想与志同道合者交流，欢迎加入 Freqtrade [Discord 服务器](https://discord.gg/p7nuUNVfP7)。
+
+## 准备好开始了吗？
+
+建议先阅读[Docker 安装指南](./docker_quickstart.md)（推荐）或 [非 Docker 安装指南](./installation.md)。
